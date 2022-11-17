@@ -103,9 +103,7 @@ func (h *HashCache) getHash32(c *context, data []byte) common.Hash {
 	var key [32]byte
 	copy(key[:], data)
 	h.lock32.Lock()
-	defer h.lock32.Unlock()
-	entry, found := h.index32[key]
-	if found {
+	if entry, found := h.index32[key]; found {
 		h.hit++
 		// Move entry to the front.
 		if entry != h.head32 {
@@ -122,13 +120,27 @@ func (h *HashCache) getHash32(c *context, data []byte) common.Hash {
 			h.head32.pred = entry
 			h.head32 = entry
 		}
+		h.lock32.Unlock()
 		return entry.hash
 	}
 	h.miss++
-	// get free slot
-	entry = h.getFree32()
+
+	// Compute the hash without holding the lock.
+	h.lock32.Unlock()
+	hash := getHash(c, data)
+	h.lock32.Lock()
+	defer h.lock32.Unlock()
+
+	// We need to check that the key has not be added concurrently.
+	if _, found := h.index32[key]; found {
+		// If it was added concurrently, we are done.
+		return hash
+	}
+
+	// The key is still not present, so we add it.
+	entry := h.getFree32()
 	entry.key = key
-	entry.hash = getHash(c, data)
+	entry.hash = hash
 	entry.pred = nil
 	entry.succ = h.head32
 	h.head32.pred = entry
@@ -141,9 +153,7 @@ func (h *HashCache) getHash64(c *context, data []byte) common.Hash {
 	var key [64]byte
 	copy(key[:], data)
 	h.lock64.Lock()
-	defer h.lock64.Unlock()
-	entry, found := h.index64[key]
-	if found {
+	if entry, found := h.index64[key]; found {
 		h.hit++
 		// Move entry to the front.
 		if entry != h.head64 {
@@ -160,13 +170,27 @@ func (h *HashCache) getHash64(c *context, data []byte) common.Hash {
 			h.head64.pred = entry
 			h.head64 = entry
 		}
+		h.lock64.Unlock()
 		return entry.hash
 	}
 	h.miss++
-	// get free slot
-	entry = h.getFree64()
+
+	// Compute the hash without holding the lock.
+	h.lock64.Unlock()
+	hash := getHash(c, data)
+	h.lock64.Lock()
+	defer h.lock64.Unlock()
+
+	// We need to check that the key has not be added concurrently.
+	if _, found := h.index64[key]; found {
+		// If it was added concurrently, we are done.
+		return hash
+	}
+
+	// The key is still not present, so we add it.
+	entry := h.getFree64()
 	entry.key = key
-	entry.hash = getHash(c, data)
+	entry.hash = hash
 	entry.pred = nil
 	entry.succ = h.head64
 	h.head64.pred = entry
