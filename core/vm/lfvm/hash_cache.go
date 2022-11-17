@@ -7,6 +7,137 @@ import (
 	"golang.org/x/crypto/sha3"
 )
 
+type genHashCacheEntry[K any] struct {
+	key        K
+	hash       common.Hash
+	pred, succ *genHashCacheEntry[K]
+}
+
+type genHashCache[K comparable] struct {
+	toBytes  func(*K) []byte
+	entries  []genHashCacheEntry[K]
+	index    map[K]*genHashCacheEntry[K]
+	head     *genHashCacheEntry[K]
+	tail     *genHashCacheEntry[K]
+	nextFree int
+	lock     sync.Mutex
+}
+
+// newHashCache creates a HashCache with the given capacity of entries.
+func newGenHashCache[K comparable](capacity int, toBytes func(*K) []byte) *genHashCache[K] {
+	res := &genHashCache[K]{
+		toBytes: toBytes,
+		entries: make([]genHashCacheEntry[K], capacity),
+		index:   make(map[K]*genHashCacheEntry[K], capacity),
+	}
+
+	// To avoid the need for handling the special case of an empty cache
+	// in every lookup operation we initialize the cache with one value.
+	// Since values are never removed, just evicted to make space for another,
+	// the cache will never be empty.
+	hasher := sha3.NewLegacyKeccak256().(keccakState)
+
+	// Insert first element (all zeros).
+	res.head = res.getFree()
+	res.tail = res.head
+
+	hasher.Reset()
+	var key K
+	hasher.Write(toBytes(&key))
+	var hash common.Hash
+	hasher.Read(hash[:])
+	res.head.hash = hash
+
+	res.index[key] = res.head
+
+	return res
+}
+
+func (h *genHashCache[K]) getHash(c *context, data []byte) common.Hash {
+	var key K
+	copy(h.toBytes(&key), data)
+	h.lock.Lock()
+	if entry, found := h.index[key]; found {
+		// Move entry to the front.
+		if entry != h.head {
+			// Remove from current place.
+			entry.pred.succ = entry.succ
+			if entry.succ != nil {
+				entry.succ.pred = entry.pred
+			} else {
+				h.tail = entry.pred
+			}
+			// Add to front
+			entry.pred = nil
+			entry.succ = h.head
+			h.head.pred = entry
+			h.head = entry
+		}
+		h.lock.Unlock()
+		return entry.hash
+	}
+
+	// Compute the hash without holding the lock.
+	h.lock.Unlock()
+	hash := getHash(c, data)
+	h.lock.Lock()
+	defer h.lock.Unlock()
+
+	// We need to check that the key has not be added concurrently.
+	if _, found := h.index[key]; found {
+		// If it was added concurrently, we are done.
+		return hash
+	}
+
+	// The key is still not present, so we add it.
+	entry := h.getFree()
+	entry.key = key
+	entry.hash = hash
+	entry.pred = nil
+	entry.succ = h.head
+	h.head.pred = entry
+	h.head = entry
+	h.index[key] = entry
+	return entry.hash
+}
+
+func (h *genHashCache[K]) getFree() *genHashCacheEntry[K] {
+	// If there are still free entries, use on of those.
+	if h.nextFree < len(h.entries) {
+		res := &h.entries[h.nextFree]
+		h.nextFree++
+		return res
+	}
+	// Use the tail.
+	res := h.tail
+	h.tail = h.tail.pred
+	h.tail.succ = nil
+	delete(h.index, res.key)
+	return res
+}
+
+type GenHashCache struct {
+	cache32 *genHashCache[[32]byte]
+	cache64 *genHashCache[[64]byte]
+}
+
+func newHashCacheGen(capacity32 int, capacity64 int) *GenHashCache {
+	return &GenHashCache{
+		cache32: newGenHashCache[[32]byte](capacity32, func(data *([32]byte)) []byte { return data[:] }),
+		cache64: newGenHashCache[[64]byte](capacity64, func(data *([64]byte)) []byte { return data[:] }),
+	}
+}
+
+func (h *GenHashCache) hash(c *context, data []byte) common.Hash {
+	if len(data) == 32 {
+		return h.cache32.getHash(c, data)
+	}
+	if len(data) == 64 {
+		return h.cache64.getHash(c, data)
+	}
+	return getHash(c, data)
+}
+
 type hashCacheEntry32 struct {
 	key        [32]byte
 	hash       common.Hash

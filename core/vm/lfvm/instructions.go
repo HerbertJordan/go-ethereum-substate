@@ -559,7 +559,9 @@ func opExp(c *context) {
 }
 
 // Evaluations show a 96% hit rate of this configuration.
-var hashCache = newHashCache(1<<16, 1<<18)
+//var hashCache = newHashCache(1<<16, 1<<18)
+// This is 35% slower than the non-generic version above.
+var hashCache = newHashCacheGen(1<<16, 1<<18)
 
 func opSha3(c *context) {
 	offset, size := c.stack.pop(), c.stack.peek()
